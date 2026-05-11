@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
@@ -46,14 +49,17 @@ type model struct {
 	progress   scanner.Progress
 	events     <-chan scanner.Event
 	cancelScan context.CancelFunc
+	history    scanner.HistoryStore
+	lastDiff   scanner.SnapshotDiff
 
 	width   int
 	height  int
 	focus   focusTarget
 	showAll bool
 
-	status  string
-	lastErr string
+	status    string
+	lastErr   string
+	exportDir string
 
 	scanning bool
 }
@@ -87,6 +93,12 @@ func NewModel(engine *scanner.Engine) model {
 		focus:   focusInput,
 		status:  "Enter a CIDR and press Enter to scan.",
 	}
+	if cwd, err := os.Getwd(); err == nil {
+		m.exportDir = cwd
+	} else {
+		m.exportDir = "."
+	}
+	m.history = scanner.NewHistoryStore(filepath.Join(m.exportDir, ".lanscanner-history"))
 
 	subnets, err := network.DiscoverSubnets()
 	if err == nil {
@@ -143,9 +155,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.clear) && !m.scanning:
 			m.results = nil
 			m.progress = scanner.Progress{}
+			m.lastDiff = scanner.SnapshotDiff{}
 			m.status = "Results cleared."
 			m.lastErr = ""
 			m.syncRows()
+			return m, tea.Batch(cmds...)
+		case key.Matches(msg, m.keys.exportCSV) && !m.scanning:
+			if err := m.exportResults("csv"); err != nil {
+				m.lastErr = err.Error()
+			}
+			return m, tea.Batch(cmds...)
+		case key.Matches(msg, m.keys.exportJSON) && !m.scanning:
+			if err := m.exportResults("json"); err != nil {
+				m.lastErr = err.Error()
+			}
 			return m, tea.Batch(cmds...)
 		case key.Matches(msg, m.keys.stop) && m.scanning:
 			if m.cancelScan != nil {
@@ -224,6 +247,7 @@ func (m model) View() tea.View {
 		header,
 		inputSection,
 		statusSection,
+		m.renderChanges(),
 		tableSection,
 		detailSection,
 		m.styles.Muted.Render(helpSection),
@@ -253,6 +277,7 @@ func (m *model) startScan() (tea.Cmd, error) {
 	m.scanning = true
 	m.progress = scanner.Progress{}
 	m.results = nil
+	m.lastDiff = scanner.SnapshotDiff{}
 	m.lastErr = ""
 	m.status = "Starting scan..."
 	m.syncRows()
@@ -280,6 +305,7 @@ func (m *model) finishScan(err error) {
 
 	switch {
 	case err == nil:
+		m.persistHistory()
 		m.status = fmt.Sprintf(
 			"Scan finished. %d host(s) found out of %d targets.",
 			m.progress.Alive,
@@ -315,7 +341,7 @@ func (m *model) toggleFocus() tea.Cmd {
 
 func (m *model) resizeTable() {
 	tableWidth := m.width - 6
-	tableHeight := m.height - 19
+	tableHeight := m.height - 26
 	ui.ResizeResultsTable(&m.table, tableWidth, tableHeight)
 }
 
@@ -326,7 +352,7 @@ func (m *model) syncRows() {
 func (m model) renderHeader() string {
 	title := m.styles.Title.Render("LAN Scanner")
 	subtitle := m.styles.Subtitle.Render(
-		"Bubble Tea powered host discovery for local IPv4 networks",
+		"Bubble Tea powered LAN scanner with common-port scanning and export",
 	)
 	return lipgloss.JoinVertical(lipgloss.Left, title, subtitle)
 }
@@ -337,6 +363,7 @@ func (m model) renderInput() string {
 	if len(m.subnets) > 0 {
 		hints = "Detected: " + strings.Join(subnetDescriptions(m.subnets), ", ")
 	}
+	hints += " | common ports: " + strings.Join(defaultPortLabels(), ", ")
 
 	boxStyle := m.styles.Box
 	if m.focus == focusInput {
@@ -386,8 +413,28 @@ func (m model) renderStatus() string {
 	)
 }
 
+func (m model) renderChanges() string {
+	label := m.styles.Section.Render("Device changes")
+
+	var lines []string
+	switch {
+	case m.scanning:
+		lines = []string{m.styles.Muted.Render("Changes will be computed when the scan completes.")}
+	case !m.lastDiff.HasPrevious:
+		lines = []string{m.styles.Muted.Render(m.lastDiff.Summary())}
+	default:
+		lines = []string{m.styles.StatusOK.Render(m.lastDiff.Summary())}
+		lines = append(lines, renderHostList(m.styles, "New", m.lastDiff.Added, m.styles.StatusOK)...)
+		lines = append(lines, renderHostList(m.styles, "Offline", m.lastDiff.Removed, m.styles.StatusErr)...)
+	}
+
+	return m.styles.Box.Width(m.width - 4).Render(
+		lipgloss.JoinVertical(lipgloss.Left, append([]string{label}, lines...)...),
+	)
+}
+
 func (m model) renderTable() string {
-	label := m.styles.Section.Render("Discovered hosts")
+	label := m.styles.Section.Render("Discovered hosts and ports")
 	tableView := m.table.View()
 	if len(m.results) == 0 {
 		tableView = m.styles.Muted.Render("No hosts discovered yet.")
@@ -450,6 +497,86 @@ func subnetDescriptions(subnets []network.InterfaceSubnet) []string {
 		descriptions = append(descriptions, fmt.Sprintf("%s %s", subnet.Name, subnet.CIDR()))
 	}
 	return descriptions
+}
+
+func (m *model) exportResults(format string) error {
+	if len(m.results) == 0 {
+		return fmt.Errorf("there are no results to export")
+	}
+
+	snapshot := scanner.NewSnapshot(m.progress, m.results)
+	filename := filepath.Join(
+		m.exportDir,
+		fmt.Sprintf("lanscanner-%s.%s", time.Now().Format("20060102-150405"), format),
+	)
+
+	var err error
+	switch format {
+	case "csv":
+		err = scanner.ExportCSV(filename, snapshot)
+	case "json":
+		err = scanner.ExportJSON(filename, snapshot)
+	default:
+		return fmt.Errorf("unsupported export format: %s", format)
+	}
+	if err != nil {
+		return err
+	}
+
+	m.lastErr = ""
+	m.status = fmt.Sprintf("Exported %d host(s) to %s.", len(m.results), filename)
+	return nil
+}
+
+func defaultPortLabels() []string {
+	ports := scanner.DefaultPortTargets()
+	labels := make([]string, 0, len(ports))
+	for _, port := range ports {
+		switch port {
+		case 22, 80, 443, 445, 3389, 8080:
+			labels = append(labels, fmt.Sprintf("%d", port))
+		}
+	}
+	return labels
+}
+
+func (m *model) persistHistory() {
+	snapshot := scanner.NewSnapshot(m.progress, m.results)
+
+	previous, ok, err := m.history.LoadLatest(snapshot.Subnet)
+	if err != nil {
+		m.lastErr = fmt.Sprintf("load history: %v", err)
+		m.lastDiff = scanner.SnapshotDiff{}
+	} else if ok {
+		m.lastDiff = scanner.CompareSnapshots(previous, snapshot)
+	} else {
+		m.lastDiff = scanner.SnapshotDiff{}
+	}
+
+	if err := m.history.Save(snapshot); err != nil {
+		m.lastErr = fmt.Sprintf("save history: %v", err)
+	}
+}
+
+func renderHostList(styles ui.Styles, label string, hosts []scanner.Host, lineStyle lipgloss.Style) []string {
+	if len(hosts) == 0 {
+		return []string{styles.Muted.Render(label + ": none")}
+	}
+
+	limit := len(hosts)
+	if limit > 4 {
+		limit = 4
+	}
+
+	values := make([]string, 0, limit+1)
+	for _, host := range hosts[:limit] {
+		values = append(values, host.IP.String())
+	}
+	if len(hosts) > limit {
+		values = append(values, fmt.Sprintf("+%d more", len(hosts)-limit))
+	}
+
+	return []string{lineStyle.Render(fmt.Sprintf("%s: %s", label, strings.Join(values, ", ")))}
 }
 
 func blankFallback(value string) string {

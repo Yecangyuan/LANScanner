@@ -7,6 +7,8 @@ type keyMap struct {
 	stop       key.Binding
 	switchPane key.Binding
 	clear      key.Binding
+	exportCSV  key.Binding
+	exportJSON key.Binding
 	help       key.Binding
 	quit       key.Binding
 }
@@ -29,6 +31,14 @@ func defaultKeyMap() keyMap {
 			key.WithKeys("c"),
 			key.WithHelp("c", "clear results"),
 		),
+		exportCSV: key.NewBinding(
+			key.WithKeys("e"),
+			key.WithHelp("e", "export csv"),
+		),
+		exportJSON: key.NewBinding(
+			key.WithKeys("E"),
+			key.WithHelp("E", "export json"),
+		),
 		help: key.NewBinding(
 			key.WithKeys("?"),
 			key.WithHelp("?", "toggle help"),
@@ -41,12 +51,13 @@ func defaultKeyMap() keyMap {
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.start, k.stop, k.switchPane, k.quit}
+	return []key.Binding{k.start, k.stop, k.exportCSV, k.quit}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.start, k.stop, k.switchPane},
-		{k.clear, k.help, k.quit},
+		{k.clear, k.exportCSV, k.exportJSON},
+		{k.help, k.quit},
 	}
 }

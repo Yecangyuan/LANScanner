@@ -12,6 +12,7 @@ import (
 
 type Engine struct {
 	prober      Prober
+	portScanner PortScanner
 	concurrency int
 }
 
@@ -40,6 +41,12 @@ func NewEngine(prober Prober, opts ...Option) *Engine {
 	}
 
 	return engine
+}
+
+func WithPortScanner(portScanner PortScanner) Option {
+	return func(e *Engine) {
+		e.portScanner = portScanner
+	}
 }
 
 func (e *Engine) Scan(ctx context.Context, prefix netip.Prefix) (<-chan Event, error) {
@@ -86,6 +93,16 @@ func (e *Engine) Scan(ctx context.Context, prefix netip.Prefix) (<-chan Event, e
 
 				for ip := range jobs {
 					result, err := e.prober.Probe(scanCtx, ip)
+					if err == nil && result.Alive && e.portScanner != nil {
+						openPorts, portErr := e.portScanner.Scan(scanCtx, ip)
+						if portErr != nil {
+							if errors.Is(portErr, context.Canceled) {
+								err = portErr
+							}
+						} else {
+							result.OpenPorts = openPorts
+						}
+					}
 					select {
 					case results <- probeMessage{ip: ip, result: result, err: err}:
 					case <-scanCtx.Done():
@@ -146,6 +163,7 @@ func (e *Engine) Scan(ctx context.Context, prefix netip.Prefix) (<-chan Event, e
 					Vendor:     item.result.Vendor,
 					Source:     item.result.Source,
 					DetectedAt: time.Now(),
+					OpenPorts:  append([]OpenPort(nil), item.result.OpenPorts...),
 				},
 			}
 		}

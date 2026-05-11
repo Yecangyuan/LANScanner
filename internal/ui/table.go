@@ -37,7 +37,7 @@ func HostRows(hosts []scanner.Host) []table.Row {
 		rows = append(rows, table.Row{
 			host.IP.String(),
 			blankFallback(host.Hostname),
-			blankFallback(host.MAC),
+			blankFallback(scanner.SummarizePorts(host.OpenPorts, 3)),
 			blankFallback(host.Source),
 			host.DetectedAt.Format("15:04:05"),
 		})
@@ -52,6 +52,8 @@ func DetailLines(host scanner.Host) []string {
 		fmt.Sprintf("MAC: %s", blankFallback(host.MAC)),
 		fmt.Sprintf("Vendor: %s", blankFallback(host.Vendor)),
 		fmt.Sprintf("Source: %s", blankFallback(host.Source)),
+		fmt.Sprintf("Open Port Count: %d", len(host.OpenPorts)),
+		fmt.Sprintf("Open Ports: %s", blankFallback(scanner.JoinPortLabels(host.OpenPorts, ", "))),
 		fmt.Sprintf("Seen: %s", host.DetectedAt.Format("2006-01-02 15:04:05")),
 	}
 }
@@ -65,10 +67,10 @@ func blankFallback(value string) string {
 
 func defaultColumns(width int) []table.Column {
 	ipWidth := 16
-	macWidth := 18
+	portsWidth := 26
 	sourceWidth := 10
 	seenWidth := 10
-	hostnameWidth := width - ipWidth - macWidth - sourceWidth - seenWidth - 10
+	hostnameWidth := width - ipWidth - portsWidth - sourceWidth - seenWidth - 10
 	if hostnameWidth < 18 {
 		hostnameWidth = 18
 	}
@@ -76,7 +78,7 @@ func defaultColumns(width int) []table.Column {
 	return []table.Column{
 		{Title: "IP", Width: ipWidth},
 		{Title: "Hostname", Width: hostnameWidth},
-		{Title: "MAC", Width: macWidth},
+		{Title: "Ports", Width: portsWidth},
 		{Title: "Source", Width: sourceWidth},
 		{Title: "Seen", Width: seenWidth},
 	}
